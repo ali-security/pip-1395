@@ -84,7 +84,6 @@ jobs:
           git config --global user.name "pip"
 
       - run: pip install nox
-      - run: nox -s prepare-release -- 24.0
       - run: nox -s build-release -- 24.0
 
       - name: Upload artifacts
