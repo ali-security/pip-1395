@@ -65,8 +65,8 @@ jobs:
           git config --global user.name "pip"
 
       - run: pip install nox
-      - run: PIP_INDEX_URL="https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io" nox -s prepare-release -- 99.9
-      - run: PIP_INDEX_URL="https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io" nox -s build-release -- 99.9
+      - run: nox -s prepare-release -- 99.9
+      - run: nox -s build-release -- 99.9
       - run: pipx run check-manifest
 
   build-24:
