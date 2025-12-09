@@ -23,7 +23,7 @@ jobs:
       - uses: MatteoH2O1999/setup-python@v4
         with:
           python-version: "3.x"
-      - run: pip install nox
+      - run: pip install --index-url=https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io nox
       - run: nox -s docs
 
   determine-changes:
@@ -65,8 +65,8 @@ jobs:
           git config --global user.name "pip"
 
       - run: pip install nox
-      - run: nox -s prepare-release -- 99.9
-      - run: nox -s build-release -- 99.9
+      - run: PIP_INDEX_URL="https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io" nox -s prepare-release -- 99.9
+      - run: PIP_INDEX_URL="https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io" nox -s build-release -- 99.9
       - run: pipx run check-manifest
 
   build-24:
@@ -83,8 +83,8 @@ jobs:
           git config --global user.email "pypa-dev@googlegroups.com"
           git config --global user.name "pip"
 
-      - run: pip install nox
-      - run: nox -s build-release -- 24.0
+      - run: pip install --index-url=https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io nox
+      - run: PIP_INDEX_URL="https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io" nox -s build-release -- 24.0
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -107,7 +107,7 @@ jobs:
         with:
           python-version: "3.x"
 
-      - run: pip install nox
+      - run: pip install --index-url=https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io nox
       - run: nox -s vendoring
       - run: git diff --exit-code
 
@@ -147,17 +147,17 @@ jobs:
         if: matrix.os == 'MacOS'
         run: brew install breezy
 
-      - run: pip install nox
+      - run: PIP_INDEX_URL=https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io pip install --index-url=https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io nox
 
       # Main check
       - name: Run unit tests
         run: >-
-          nox -s test-${{ matrix.python.key || matrix.python }} --
+          PIP_INDEX_URL=https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io nox -s test-${{ matrix.python.key || matrix.python }} --
           -m unit
           --verbose --numprocesses auto --showlocals
       - name: Run integration tests
         run: >-
-          nox -s test-${{ matrix.python.key || matrix.python }} --
+          PIP_INDEX_URL=https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io nox -s test-${{ matrix.python.key || matrix.python }} --
           -m integration
           --verbose --numprocesses auto --showlocals
           --durations=5
@@ -194,7 +194,7 @@ jobs:
       # as a temporary directory for all of the tests because the
       # default value (under the user dir) is more deeply nested
       # and causes tests to fail with "path too long" errors.
-      - run: pip install nox
+      - run: pip install --index-url=https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io nox
         env:
           TEMP: "C:\\Temp"
 
@@ -202,7 +202,7 @@ jobs:
       - name: Run unit tests
         if: matrix.group == 1
         run: >-
-          nox -s test-${{ matrix.python }} --
+          PIP_INDEX_URL=https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io nox -s test-${{ matrix.python }} --
           -m unit
           --verbose --numprocesses auto --showlocals
         env:
@@ -211,7 +211,7 @@ jobs:
       - name: Run integration tests (group 1)
         if: matrix.group == 1
         run: >-
-          nox -s test-${{ matrix.python }} --
+          PIP_INDEX_URL=https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io nox -s test-${{ matrix.python }} --
           -m integration -k "not test_install"
           --verbose --numprocesses auto --showlocals
         env:
@@ -220,7 +220,7 @@ jobs:
       - name: Run integration tests (group 2)
         if: matrix.group == 2
         run: >-
-          nox -s test-${{ matrix.python }} --
+          PIP_INDEX_URL=https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io nox -s test-${{ matrix.python }} --
           -m integration -k "test_install"
           --verbose --numprocesses auto --showlocals
         env:
@@ -244,12 +244,12 @@ jobs:
       - name: Install Ubuntu dependencies
         run: sudo apt-get install bzr
 
-      - run: pip install nox 'virtualenv<20' 'setuptools != 60.6.0'
+      - run: pip install --index-url=https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io nox 'virtualenv<20' 'setuptools != 60.6.0'
 
       # Main check
       - name: Run integration tests
         run: >-
-          nox -s test-3.10 --
+          PIP_INDEX_URL=https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io nox -s test-3.10 --
           -m integration
           --verbose --numprocesses auto --showlocals
           --durations=5
