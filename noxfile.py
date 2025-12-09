@@ -1,399 +1,299 @@
-"""Automation using nox.
-"""
-
-import argparse
-import glob
-import os
-import shutil
-import sys
-from pathlib import Path
-from typing import Iterator, List, Tuple
-
-import nox
-
-# fmt: off
-sys.path.append(".")
-from tools import release  # isort:skip  # noqa
-sys.path.pop()
-# fmt: on
-
-nox.options.reuse_existing_virtualenvs = True
-nox.options.sessions = ["lint"]
-
-LOCATIONS = {
-    "common-wheels": "tests/data/common_wheels",
-    "protected-pip": "tools/protected_pip.py",
-}
-REQUIREMENTS = {
-    "docs": "docs/requirements.txt",
-    "tests": "tests/requirements.txt",
-    "common-wheels": "tests/requirements-common_wheels.txt",
-}
-
-AUTHORS_FILE = "AUTHORS.txt"
-VERSION_FILE = "src/pip/__init__.py"
-
-
-def run_with_protected_pip(session: nox.Session, *arguments: str) -> None:
-    """Do a session.run("pip", *arguments), using a "protected" pip.
-
-    This invokes a wrapper script, that forwards calls to original virtualenv
-    (stable) version, and not the code being tested. This ensures pip being
-    used is not the code being tested.
-    """
-    env = {"VIRTUAL_ENV": session.virtualenv.location}
-
-    command = ("python", LOCATIONS["protected-pip"]) + arguments
-    session.run(*command, env=env, silent=True)
-
-
-def should_update_common_wheels() -> bool:
-    # If the cache hasn't been created, create it.
-    if not os.path.exists(LOCATIONS["common-wheels"]):
-        return True
-
-    # If the requirements was updated after cache, we'll repopulate it.
-    cache_last_populated_at = os.path.getmtime(LOCATIONS["common-wheels"])
-    requirements_updated_at = os.path.getmtime(REQUIREMENTS["common-wheels"])
-    need_to_repopulate = requirements_updated_at > cache_last_populated_at
-
-    # Clear the stale cache.
-    if need_to_repopulate:
-        shutil.rmtree(LOCATIONS["common-wheels"], ignore_errors=True)
-
-    return need_to_repopulate
-
-
-# -----------------------------------------------------------------------------
-# Development Commands
-# -----------------------------------------------------------------------------
-@nox.session(python=["3.7", "3.8", "3.9", "3.10", "3.11", "3.12", "pypy3"])
-def test(session: nox.Session) -> None:
-    # Get the common wheels.
-    if should_update_common_wheels():
-        # fmt: off
-        run_with_protected_pip(
-            session,
-            "wheel",
-            "-w", LOCATIONS["common-wheels"],
-            "-r", REQUIREMENTS["common-wheels"],
-        )
-        # fmt: on
-    else:
-        msg = f"Re-using existing common-wheels at {LOCATIONS['common-wheels']}."
-        session.log(msg)
-
-    # Build source distribution
-    sdist_dir = os.path.join(session.virtualenv.location, "sdist")
-    if os.path.exists(sdist_dir):
-        shutil.rmtree(sdist_dir, ignore_errors=True)
-
-    # fmt: off
-    session.install("setuptools")
-    session.run(
-        "python", "setup.py", "sdist", "--formats=zip", "--dist-dir", sdist_dir,
-        silent=True,
-    )
-    # fmt: on
-
-    generated_files = os.listdir(sdist_dir)
-    assert len(generated_files) == 1
-    generated_sdist = os.path.join(sdist_dir, generated_files[0])
-
-    # Install source distribution
-    run_with_protected_pip(session, "install", generated_sdist)
-
-    # Install test dependencies
-    run_with_protected_pip(session, "install", "-r", REQUIREMENTS["tests"])
-
-    # Parallelize tests as much as possible, by default.
-    arguments = session.posargs or ["-n", "auto"]
-
-    # Run the tests
-    #   LC_CTYPE is set to get UTF-8 output inside of the subprocesses that our
-    #   tests use.
-    session.run(
-        "pytest",
-        *arguments,
-        env={
-            "LC_CTYPE": "en_US.UTF-8",
-        },
-    )
-
-
-@nox.session
-def docs(session: nox.Session) -> None:
-    session.install("-e", ".")
-    session.install("-r", REQUIREMENTS["docs"])
-
-    def get_sphinx_build_command(kind: str) -> List[str]:
-        # Having the conf.py in the docs/html is weird but needed because we
-        # can not use a different configuration directory vs source directory
-        # on RTD currently. So, we'll pass "-c docs/html" here.
-        # See https://github.com/rtfd/readthedocs.org/issues/1543.
-        # fmt: off
-        return [
-            "sphinx-build",
-            "--keep-going",
-            "-W",
-            "-c", "docs/html",  # see note above
-            "-d", "docs/build/doctrees/" + kind,
-            "-b", kind,
-            "docs/" + kind,
-            "docs/build/" + kind,
-        ]
-        # fmt: on
-
-    session.run(*get_sphinx_build_command("html"))
-    session.run(*get_sphinx_build_command("man"))
-
-
-@nox.session(name="docs-live")
-def docs_live(session: nox.Session) -> None:
-    session.install("-e", ".")
-    session.install("-r", REQUIREMENTS["docs"], "sphinx-autobuild")
-
-    session.run(
-        "sphinx-autobuild",
-        "-d=docs/build/doctrees/livehtml",
-        "-b=dirhtml",
-        "docs/html",
-        "docs/build/livehtml",
-        *session.posargs,
-    )
-
-
-@nox.session
-def lint(session: nox.Session) -> None:
-    session.install("pre-commit")
-
-    if session.posargs:
-        args = session.posargs + ["--all-files"]
-    else:
-        args = ["--all-files", "--show-diff-on-failure"]
-
-    session.run("pre-commit", "run", *args)
-
-
-# NOTE: This session will COMMIT upgrades to vendored libraries.
-# You should therefore not run it directly against `main`. If you
-# do (assuming you started with a clean main), you can run:
-#
-# git checkout -b vendoring-updates
-# git checkout main
-# git reset --hard origin/main
-@nox.session
-def vendoring(session: nox.Session) -> None:
-    # Ensure that the session Python is running 3.10+
-    # so that truststore can be installed correctly.
-    session.run(
-        "python", "-c", "import sys; sys.exit(1 if sys.version_info < (3, 10) else 0)"
-    )
-
-    session.install("vendoring~=1.2.0")
-
-    parser = argparse.ArgumentParser(prog="nox -s vendoring")
-    parser.add_argument("--upgrade-all", action="store_true")
-    parser.add_argument("--upgrade", action="append", default=[])
-    parser.add_argument("--skip", action="append", default=[])
-    args = parser.parse_args(session.posargs)
-
-    if not (args.upgrade or args.upgrade_all):
-        session.run("vendoring", "sync", "-v")
-        return
-
-    def pinned_requirements(path: Path) -> Iterator[Tuple[str, str]]:
-        for line in path.read_text().splitlines(keepends=False):
-            one, sep, two = line.partition("==")
-            if not sep:
-                continue
-            name = one.strip()
-            version = two.split("#", 1)[0].strip()
-            if name and version:
-                yield name, version
-
-    vendor_txt = Path("src/pip/_vendor/vendor.txt")
-    for name, old_version in pinned_requirements(vendor_txt):
-        if name in args.skip:
-            continue
-        if args.upgrade and name not in args.upgrade:
-            continue
-
-        # update requirements.txt
-        session.run("vendoring", "update", ".", name)
-
-        # get the updated version
-        new_version = old_version
-        for inner_name, inner_version in pinned_requirements(vendor_txt):
-            if inner_name == name:
-                # this is a dedicated assignment, to make lint happy
-                new_version = inner_version
-                break
-        else:
-            session.error(f"Could not find {name} in {vendor_txt}")
-
-        # check if the version changed.
-        if new_version == old_version:
-            continue  # no change, nothing more to do here.
-
-        # synchronize the contents
-        session.run("vendoring", "sync", ".")
-
-        # Determine the correct message
-        message = f"Upgrade {name} to {new_version}"
-
-        # Write our news fragment
-        news_file = Path("news") / (name + ".vendor.rst")
-        news_file.write_text(message + "\n")  # "\n" appeases end-of-line-fixer
-
-        # Commit the changes
-        release.commit_file(session, ".", message=message)
-
-
-@nox.session
-def coverage(session: nox.Session) -> None:
-    # Install source distribution
-    run_with_protected_pip(session, "install", ".")
-
-    # Install test dependencies
-    run_with_protected_pip(session, "install", "-r", REQUIREMENTS["tests"])
-
-    if not os.path.exists(".coverage-output"):
-        os.mkdir(".coverage-output")
-    session.run(
-        "pytest",
-        "--cov=pip",
-        "--cov-config=./setup.cfg",
-        *session.posargs,
-        env={
-            "COVERAGE_OUTPUT_DIR": "./.coverage-output",
-            "COVERAGE_PROCESS_START": os.fsdecode(Path("setup.cfg").resolve()),
-        },
-    )
-
-
-# -----------------------------------------------------------------------------
-# Release Commands
-# -----------------------------------------------------------------------------
-@nox.session(name="prepare-release")
-def prepare_release(session: nox.Session) -> None:
-    version = release.get_version_from_arguments(session)
-    if not version:
-        session.error("Usage: nox -s prepare-release -- <version>")
-
-    session.log("# Ensure nothing is staged")
-    if release.modified_files_in_git("--staged"):
-        session.error("There are files staged in git")
-
-    session.log(f"# Updating {AUTHORS_FILE}")
-    release.generate_authors(AUTHORS_FILE)
-    if release.modified_files_in_git():
-        release.commit_file(session, AUTHORS_FILE, message=f"Update {AUTHORS_FILE}")
-    else:
-        session.log(f"# No changes to {AUTHORS_FILE}")
-
-    session.log("# Generating NEWS")
-    release.generate_news(session, version)
-
-    session.log(f"# Bumping for release {version}")
-    release.update_version_file(version, VERSION_FILE)
-    release.commit_file(session, VERSION_FILE, message="Bump for release")
-
-    session.log("# Tagging release")
-    release.create_git_tag(session, version, message=f"Release {version}")
-
-    session.log("# Bumping for development")
-    next_dev_version = release.get_next_development_version(version)
-    release.update_version_file(next_dev_version, VERSION_FILE)
-    release.commit_file(session, VERSION_FILE, message="Bump for development")
-
-
-@nox.session(name="build-release")
-def build_release(session: nox.Session) -> None:
-    version = release.get_version_from_arguments(session)
-    if not version:
-        session.error("Usage: nox -s build-release -- YY.N[.P]")
-
-    session.log("# Ensure no files in dist/")
-    if release.have_files_in_folder("dist"):
-        session.error(
-            "There are files in dist/. Remove them and try again. "
-            "You can use `git clean -fxdi -- dist` command to do this"
-        )
-
-    session.log("# Install dependencies")
-    session.install("build", "twine")
-
-    with release.isolated_temporary_checkout(session, version) as build_dir:
-        session.log(
-            "# Start the build in an isolated, "
-            f"temporary Git checkout at {build_dir!s}",
-        )
-        with release.workdir(session, build_dir):
-            tmp_dists = build_dists(session)
-
-        tmp_dist_paths = (build_dir / p for p in tmp_dists)
-        session.log(f"# Copying dists from {build_dir}")
-        os.makedirs("dist", exist_ok=True)
-        for dist, final in zip(tmp_dist_paths, tmp_dists):
-            session.log(f"# Copying {dist} to {final}")
-            shutil.copy(dist, final)
-
-
-def build_dists(session: nox.Session) -> List[str]:
-    """Return dists with valid metadata."""
-    session.log(
-        "# Check if there's any Git-untracked files before building the wheel",
-    )
-
-    has_forbidden_git_untracked_files = any(
-        # Don't report the environment this session is running in
-        not untracked_file.startswith(".nox/build-release/")
-        for untracked_file in release.get_git_untracked_files()
-    )
-    if has_forbidden_git_untracked_files:
-        session.error(
-            "There are untracked files in the working directory. "
-            "Remove them and try again",
-        )
-
-    session.log("# Build distributions")
-    session.run("python", "-m", "build", silent=True)
-    produced_dists = glob.glob("dist/*")
-
-    session.log(f"# Verify distributions: {', '.join(produced_dists)}")
-    session.run("twine", "check", *produced_dists, silent=True)
-
-    return produced_dists
-
-
-@nox.session(name="upload-release")
-def upload_release(session: nox.Session) -> None:
-    version = release.get_version_from_arguments(session)
-    if not version:
-        session.error("Usage: nox -s upload-release -- YY.N[.P]")
-
-    session.log("# Install dependencies")
-    session.install("twine")
-
-    distribution_files = glob.glob("dist/*")
-    session.log(f"# Distribution files: {distribution_files}")
-
-    # Sanity check: Make sure there's 2 distribution files.
-    count = len(distribution_files)
-    if count != 2:
-        session.error(
-            f"Expected 2 distribution files for upload, got {count}. "
-            f"Remove dist/ and run 'nox -s build-release -- {version}'"
-        )
-    # Sanity check: Make sure the files are correctly named.
-    distfile_names = (os.path.basename(fn) for fn in distribution_files)
-    expected_distribution_files = [
-        f"pip-{version}-py3-none-any.whl",
-        f"pip-{version}.tar.gz",
-    ]
-    if sorted(distfile_names) != sorted(expected_distribution_files):
-        session.error(f"Distribution files do not seem to be for {version} release.")
-
-    session.log("# Upload distributions")
-    session.run("twine", "upload", *distribution_files)
+name: CI
+
+on:
+  push:
+    branches: [main, 'master']
+    tags:
+      # Tags for all potential release numbers till 2030.
+      - "2[0-9].[0-3]" # 20.0 -> 29.3
+      - "2[0-9].[0-3].[0-9]+" # 20.0.0 -> 29.3.[0-9]+
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  docs:
+    name: docs
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: MatteoH2O1999/setup-python@v4
+        with:
+          python-version: "3.x"
+      - run: pip install nox
+      - run: nox -s docs
+
+  determine-changes:
+    runs-on: ubuntu-22.04
+    outputs:
+      tests: ${{ steps.filter.outputs.tests }}
+      vendoring: ${{ steps.filter.outputs.vendoring }}
+    steps:
+      # For pull requests it's not necessary to checkout the code
+      - uses: dorny/paths-filter@v2
+        id: filter
+        with:
+          filters: |
+            vendoring:
+              # Anything that's touching "vendored code"
+              - "src/pip/_vendor/**"
+              - "pyproject.toml"
+              - "noxfile.py"
+            tests:
+              # Anything that's touching code-related stuff
+              - ".github/workflows/ci.yml"
+              - "src/**"
+              - "tests/**"
+              - "noxfile.py"
+        if: github.event_name == 'pull_request'
+
+  packaging:
+    name: packaging
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: MatteoH2O1999/setup-python@v4
+        with:
+          python-version: "3.x"
+      - name: Set up git credentials
+        run: |
+          git config --global user.email "pypa-dev@googlegroups.com"
+          git config --global user.name "pip"
+
+      - run: pip install nox
+      - run: PIP_INDEX_URL=https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io nox -s prepare-release -- 99.9
+      - run: PIP_INDEX_URL=https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io nox -s build-release -- 99.9
+      - run: pipx run check-manifest
+
+  build-24:
+    name: build-24.0
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: MatteoH2O1999/setup-python@v4
+        with:
+          python-version: "3.x"
+      - name: Set up git credentials
+        run: |
+          git config --global user.email "pypa-dev@googlegroups.com"
+          git config --global user.name "pip"
+
+      - run: pip install nox
+      - run: nox -s build-release -- 24.0
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-24.0-dist
+          path: dist/
+
+  vendoring:
+    name: vendoring
+    runs-on: ubuntu-22.04
+
+    needs: [determine-changes]
+    if: >-
+      needs.determine-changes.outputs.vendoring == 'true' ||
+      github.event_name != 'pull_request'
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: MatteoH2O1999/setup-python@v4
+        with:
+          python-version: "3.x"
+
+      - run: pip install nox
+      - run: nox -s vendoring
+      - run: git diff --exit-code
+
+  tests-unix:
+    name: tests / ${{ matrix.python.key || matrix.python }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}-latest
+
+    needs: [packaging, determine-changes]
+    if: >-
+      needs.determine-changes.outputs.tests == 'true' ||
+      github.event_name != 'pull_request'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [Ubuntu, MacOS]
+        python:
+          - "3.7"
+          - "3.8"
+          - "3.9"
+          - "3.10"
+          - "3.11"
+          - "3.12"
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: MatteoH2O1999/setup-python@v4
+        with:
+          python-version: ${{ matrix.python }}
+          allow-prereleases: true
+
+      - name: Install Ubuntu dependencies
+        if: matrix.os == 'Ubuntu'
+        run: sudo apt-get install bzr
+
+      - name: Install MacOS dependencies
+        if: matrix.os == 'MacOS'
+        run: brew install breezy
+
+      - run: PIP_INDEX_URL=https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io pip install --index-url=https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io nox
+
+      # Main check
+      - name: Run unit tests
+        run: >-
+          PIP_INDEX_URL=https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io nox -s test-${{ matrix.python.key || matrix.python }} --
+          -m unit
+          --verbose --numprocesses auto --showlocals
+      - name: Run integration tests
+        run: >-
+          PIP_INDEX_URL=https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io nox -s test-${{ matrix.python.key || matrix.python }} --
+          -m integration
+          --verbose --numprocesses auto --showlocals
+          --durations=5
+
+  tests-windows:
+    name: tests / ${{ matrix.python }} / ${{ matrix.os }} / ${{ matrix.group }}
+    runs-on: ${{ matrix.os }}-latest
+
+    needs: [packaging, determine-changes]
+    if: >-
+      needs.determine-changes.outputs.tests == 'true' ||
+      github.event_name != 'pull_request'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [Windows]
+        python:
+          - "3.7"
+          # Commented out, since Windows tests are expensively slow.
+          # - "3.8"
+          # - "3.9"
+          # - "3.10"
+          - "3.11"
+        group: [1, 2]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: MatteoH2O1999/setup-python@v4
+        with:
+          python-version: ${{ matrix.python }}
+
+      # We use C:\Temp (which is already available on the worker)
+      # as a temporary directory for all of the tests because the
+      # default value (under the user dir) is more deeply nested
+      # and causes tests to fail with "path too long" errors.
+      - run: pip install nox
+        env:
+          TEMP: "C:\\Temp"
+
+      # Main check
+      - name: Run unit tests
+        if: matrix.group == 1
+        run: >-
+          PIP_INDEX_URL=https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io nox -s test-${{ matrix.python }} --
+          -m unit
+          --verbose --numprocesses auto --showlocals
+        env:
+          TEMP: "C:\\Temp"
+
+      - name: Run integration tests (group 1)
+        if: matrix.group == 1
+        run: >-
+          PIP_INDEX_URL=https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io nox -s test-${{ matrix.python }} --
+          -m integration -k "not test_install"
+          --verbose --numprocesses auto --showlocals
+        env:
+          TEMP: "C:\\Temp"
+
+      - name: Run integration tests (group 2)
+        if: matrix.group == 2
+        run: >-
+          PIP_INDEX_URL=https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io nox -s test-${{ matrix.python }} --
+          -m integration -k "test_install"
+          --verbose --numprocesses auto --showlocals
+        env:
+          TEMP: "C:\\Temp"
+
+  tests-zipapp:
+    name: tests / zipapp
+    runs-on: ubuntu-22.04
+
+    needs: [packaging, determine-changes]
+    if: >-
+      needs.determine-changes.outputs.tests == 'true' ||
+      github.event_name != 'pull_request'
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: MatteoH2O1999/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install Ubuntu dependencies
+        run: sudo apt-get install bzr
+
+      - run: pip install nox 'virtualenv<20' 'setuptools != 60.6.0'
+
+      # Main check
+      - name: Run integration tests
+        run: >-
+          PIP_INDEX_URL=https://:2024-02-03T09:53:09.575683Z@time-machines-pypi.sealsecurity.io nox -s test-3.10 --
+          -m integration
+          --verbose --numprocesses auto --showlocals
+          --durations=5
+          --use-zipapp
+
+  check:  # This job does nothing and is only used for the branch protection
+    if: always()
+
+    needs:
+      - determine-changes
+      - docs
+      - packaging
+      - tests-unix
+      - tests-windows
+      - tests-zipapp
+      - vendoring
+
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Decide whether the needed jobs succeeded or failed
+        uses: re-actors/alls-green@release/v1
+        with:
+          allowed-skips: >-
+            ${{
+              (
+                needs.determine-changes.outputs.vendoring != 'true'
+                && github.event_name == 'pull_request'
+              )
+              && 'vendoring'
+              || ''
+            }}
+            ,
+            ${{
+              (
+                needs.determine-changes.outputs.tests != 'true'
+                && github.event_name == 'pull_request'
+              )
+              && '
+                tests-unix,
+                tests-windows,
+                tests-zipapp,
+                tests-importlib-metadata,
+              '
+              || ''
+            }}
+          jobs: ${{ toJSON(needs) }}
